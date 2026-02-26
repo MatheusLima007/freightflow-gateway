@@ -21,4 +21,5 @@ exports.observabilityPlugin = void 0;
 var fastify_plugin_1 = require("./fastify-plugin");
 Object.defineProperty(exports, "observabilityPlugin", { enumerable: true, get: function () { return __importDefault(fastify_plugin_1).default; } });
 __exportStar(require("./logger"), exports);
+__exportStar(require("./resilience-metrics"), exports);
 //# sourceMappingURL=index.js.map
