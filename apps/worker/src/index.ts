@@ -1,11 +1,14 @@
 import { prisma } from '@freightflow/core';
-import { logger } from '@freightflow/observability';
+import { incrementCounter, logger } from '@freightflow/observability';
+import { getSandboxSettings } from '@freightflow/providers';
 import { calculateExponentialBackoff, CircuitOpenError, RollingWindowCircuitBreaker } from '@freightflow/reliability';
 import { createHmac } from 'crypto';
+import { buildEventPlan } from './webhook-chaos';
 const MAX_ATTEMPTS = 5;
 const FETCH_TIMEOUT_MS = 5000;
 let isProcessing = false;
 const webhookCircuits = new Map<string, RollingWindowCircuitBreaker>();
+const sandboxSettings = getSandboxSettings();
 
 function getWebhookCircuit(subscriptionId: string): RollingWindowCircuitBreaker {
   const existing = webhookCircuits.get(subscriptionId);
@@ -53,6 +56,32 @@ function getNextAttemptDelay(attempts: number) {
   });
 }
 
+function retryDelayFromError(error: unknown, attempts: number): number {
+  const retryAfterSeconds = Number((error as { retryAfterSeconds?: number })?.retryAfterSeconds);
+  if (Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0) {
+    return retryAfterSeconds * 1000;
+  }
+
+  return getNextAttemptDelay(attempts);
+}
+
+async function deliverWebhook(subscription: any, payload: Record<string, unknown>): Promise<Response> {
+  const payloadString = JSON.stringify(payload);
+  const signature = subscription.secret
+    ? createHmac('sha256', subscription.secret).update(payloadString).digest('hex')
+    : '';
+
+  return fetch(subscription.url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(signature ? { 'x-webhook-signature': signature } : {})
+    },
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    body: payloadString
+  });
+}
+
 async function processWebhooks() {
   if (isProcessing) {
     logger.warn('Skipping worker pass because previous pass is still running');
@@ -75,6 +104,10 @@ async function processWebhooks() {
       include: {
         subscription: true
       },
+      orderBy: [
+        { subscriptionId: 'asc' },
+        { createdAt: 'asc' },
+      ],
       take: 50
     });
 
@@ -84,11 +117,28 @@ async function processWebhooks() {
 
     logger.info({ count: events.length }, 'Found webhook events to process');
 
-    for (const event of events) {
+    const plan = buildEventPlan(events);
+
+    for (const planned of plan) {
+      const { event, drop, duplicate, duplicateWithNewEventId, profile } = planned;
       const { subscription, payload } = event;
       const isLastAttempt = event.attempts >= MAX_ATTEMPTS - 1;
-      const payloadString = JSON.stringify(payload);
       const circuit = getWebhookCircuit(subscription.id);
+
+      if (drop) {
+        incrementCounter('webhook_chaos_drop_total', { subscriptionId: subscription.id, profile });
+        logger.warn({ eventId: event.id, profile, subscriptionId: subscription.id }, 'Webhook dropped by sandbox chaos policy');
+        await prisma.webhookEvent.update({
+          where: { id: event.id },
+          data: {
+            status: 'failed',
+            attempts: event.attempts + 1,
+          }
+        });
+        continue;
+      }
+
+      let deliveryAttempts = 0;
 
       try {
         const stateBeforeAllow = circuit.getState();
@@ -98,19 +148,8 @@ async function processWebhooks() {
           logger.info({ subscriptionId: subscription.id, previousState: stateBeforeAllow, nextState: circuit.getState() }, 'Webhook circuit state changed before delivery');
         }
 
-        const signature = subscription.secret
-          ? createHmac('sha256', subscription.secret).update(payloadString).digest('hex')
-          : '';
-
-        const res = await fetch(subscription.url, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            ...(signature ? { 'x-webhook-signature': signature } : {})
-          },
-          signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-          body: payloadString
-        });
+        deliveryAttempts += 1;
+        const res = await deliverWebhook(subscription, payload as Record<string, unknown>);
 
         if (res.ok) {
           const stateBeforeSuccess = circuit.getState();
@@ -125,13 +164,71 @@ async function processWebhooks() {
             where: { id: event.id },
             data: {
               status: 'delivered',
-              attempts: event.attempts + 1
+              attempts: event.attempts + deliveryAttempts
             }
           });
-          logger.info({ eventId: event.id, url: subscription.url }, 'Webhook delivered successfully');
+          incrementCounter('webhook_delivery_total', { profile, outcome: 'success' });
+          logger.info({ eventId: event.id, url: subscription.url, profile, attempt: event.attempts + 1 }, 'Webhook delivered successfully');
+
+          if (duplicate) {
+            const duplicatedPayload = {
+              ...(payload as Record<string, unknown>),
+              eventId: duplicateWithNewEventId
+                ? `${String((payload as any)?.eventId ?? event.eventId)}-dup-${event.attempts + 1}`
+                : (payload as any)?.eventId ?? event.eventId,
+            };
+
+            try {
+              deliveryAttempts += 1;
+              const duplicateResponse = await deliverWebhook(subscription, duplicatedPayload);
+              incrementCounter('webhook_chaos_duplicate_total', {
+                profile,
+                duplicateMode: duplicateWithNewEventId ? 'newEventId' : 'sameEventId',
+                outcome: duplicateResponse.ok ? 'success' : `http_${duplicateResponse.status}`,
+              });
+              logger.info(
+                {
+                  eventId: event.id,
+                  profile,
+                  duplicateMode: duplicateWithNewEventId ? 'newEventId' : 'sameEventId',
+                  duplicateStatus: duplicateResponse.status,
+                },
+                'Webhook duplicate delivery executed'
+              );
+
+              await prisma.webhookEvent.update({
+                where: { id: event.id },
+                data: {
+                  attempts: event.attempts + deliveryAttempts,
+                }
+              });
+            } catch (duplicateError) {
+              incrementCounter('webhook_chaos_duplicate_total', {
+                profile,
+                duplicateMode: duplicateWithNewEventId ? 'newEventId' : 'sameEventId',
+                outcome: 'error',
+              });
+              logger.warn(
+                {
+                  eventId: event.id,
+                  profile,
+                  duplicateMode: duplicateWithNewEventId ? 'newEventId' : 'sameEventId',
+                  err: duplicateError instanceof Error ? duplicateError.message : String(duplicateError),
+                },
+                'Duplicate webhook delivery failed'
+              );
+            }
+          }
         } else {
           const error = new Error(`HTTP Error ${res.status}`) as Error & { statusCode?: number };
           error.statusCode = res.status;
+
+          const retryAfterHeader = res.headers.get('retry-after');
+          const retryAfterSeconds = retryAfterHeader ? Number(retryAfterHeader) : NaN;
+          if (Number.isFinite(retryAfterSeconds)) {
+            (error as Error & { retryAfterSeconds?: number }).retryAfterSeconds = retryAfterSeconds;
+          }
+
           throw error;
         }
       } catch (err: any) {
@@ -159,17 +256,18 @@ async function processWebhooks() {
           }
         }
 
-        logger.warn({ eventId: event.id, err: err.message, retryable }, 'Webhook delivery failed');
+        logger.warn({ eventId: event.id, err: err.message, retryable, profile, attempt: event.attempts + 1 }, 'Webhook delivery failed');
+        incrementCounter('webhook_delivery_total', { profile, outcome: retryable ? 'retryable_error' : 'permanent_error' });
         
         const shouldRetry = retryable && !isLastAttempt;
         const nextStatus = shouldRetry ? 'pending' : 'failed';
-        const nextAttemptAt = shouldRetry ? new Date(Date.now() + getNextAttemptDelay(event.attempts)) : null;
+        const nextAttemptAt = shouldRetry ? new Date(Date.now() + retryDelayFromError(err, event.attempts)) : null;
 
         await prisma.webhookEvent.update({
           where: { id: event.id },
           data: {
             status: nextStatus,
-            attempts: event.attempts + 1,
+            attempts: event.attempts + Math.max(1, deliveryAttempts),
             nextAttemptAt
           }
         });
