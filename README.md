@@ -216,7 +216,7 @@ Escolha uma stack e mantenha consistente. Exemplos:
 
 - [x] MVP: gateway + normalização + webhooks simulados + retry + idempotência
 - [x] Circuit breaker + backoff exponencial
-- [ ] Providers sandbox avançados
+- [x] Providers sandbox avançados
 - [ ] Painel web de eventos/falhas
 - [ ] Observabilidade completa (OTel)
 
