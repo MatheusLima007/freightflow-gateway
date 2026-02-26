@@ -1,6 +1,6 @@
 # FreightFlow Gateway
 
-Gateway de integrações com transportadoras usando padrões **Adapter/Strategy**, com **normalização de dados** (quote/tracking/label), **webhooks simulados**, **retry + idempotência** e base pronta para evoluir com **circuit breaker**, **backoff exponencial**, **observabilidade** e **correlationId**.
+Gateway de integrações com transportadoras usando padrões **Adapter/Strategy**, com **normalização de dados** (quote/tracking/label), **webhooks simulados**, **retry + idempotência**, **circuit breaker**, **backoff exponencial**, **observabilidade** e **correlationId**.
 
 > Propósito: demonstrar domínio de arquitetura de integrações e resiliência (alinhado ao contexto do app GEM).
 
@@ -18,6 +18,7 @@ O FreightFlow Gateway é um serviço que unifica a comunicação com múltiplas 
   - `Tracking` (rastreamento)
 - **Webhooks** de atualização de status (simulados no MVP)
 - **Confiabilidade**: retry com política, **idempotência** e rastreio por **correlationId**
+- **Resiliência operacional**: circuit breaker por operação e por assinatura de webhook
 
 ---
 
@@ -30,8 +31,6 @@ O FreightFlow Gateway é um serviço que unifica a comunicação com múltiplas 
 4. **Retry + idempotência** (sem duplicar operações)
 
 ### Não-Objetivos no MVP (mas preparados)
-- Circuit breaker
-- Backoff exponencial avançado
 - UI/Painel web
 - Providers reais (pode ficar em mocks/sandbox)
 
@@ -39,7 +38,6 @@ O FreightFlow Gateway é um serviço que unifica a comunicação com múltiplas 
 
 ## Depois (Evoluções)
 
-- **Circuit breaker + backoff exponencial**
 - **Sandbox providers (mocks sofisticados)**
 - **Painel web** para visualizar eventos, filas, falhas e reprocessamentos
 - **Observabilidade** (logs estruturados, métricas, traces)
@@ -108,7 +106,12 @@ O FreightFlow Gateway é um serviço que unifica a comunicação com múltiplas 
   - 5xx
   - erros de rede
 - Política simples no MVP (ex.: 3 tentativas)
-- Preparado para evoluir para backoff exponencial
+- Backoff exponencial com jitter para reduzir rajadas e sincronização de retries
+
+### Circuit Breaker
+- Decorator de circuit breaker em chamadas de provider (escopo por operação)
+- Circuit breaker no worker por assinatura de webhook para proteger endpoints degradados
+- Estados `CLOSED`, `OPEN`, `HALF_OPEN` com janela deslizante para taxa de falhas
 
 ---
 
@@ -212,7 +215,7 @@ Escolha uma stack e mantenha consistente. Exemplos:
 ## Roadmap resumido
 
 - [x] MVP: gateway + normalização + webhooks simulados + retry + idempotência
-- [ ] Circuit breaker + backoff exponencial
+- [x] Circuit breaker + backoff exponencial
 - [ ] Providers sandbox avançados
 - [ ] Painel web de eventos/falhas
 - [ ] Observabilidade completa (OTel)
