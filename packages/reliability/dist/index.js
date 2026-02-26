@@ -20,5 +20,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.idempotencyPlugin = void 0;
 var fastify_plugin_1 = require("./fastify-plugin");
 Object.defineProperty(exports, "idempotencyPlugin", { enumerable: true, get: function () { return __importDefault(fastify_plugin_1).default; } });
+__exportStar(require("./backoff"), exports);
+__exportStar(require("./circuit-breaker"), exports);
 __exportStar(require("./idempotency"), exports);
 //# sourceMappingURL=index.js.map
