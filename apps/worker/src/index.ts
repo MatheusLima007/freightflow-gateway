@@ -1,15 +1,56 @@
 import { prisma } from '@freightflow/core';
 import { logger } from '@freightflow/observability';
+import { calculateExponentialBackoff, CircuitOpenError, RollingWindowCircuitBreaker } from '@freightflow/reliability';
 import { createHmac } from 'crypto';
 const MAX_ATTEMPTS = 5;
 const FETCH_TIMEOUT_MS = 5000;
 let isProcessing = false;
+const webhookCircuits = new Map<string, RollingWindowCircuitBreaker>();
 
-// Basic backoff: 2s, 4s, 8s, 16s...
+function getWebhookCircuit(subscriptionId: string): RollingWindowCircuitBreaker {
+  const existing = webhookCircuits.get(subscriptionId);
+  if (existing) {
+    return existing;
+  }
+
+  const circuit = new RollingWindowCircuitBreaker({
+    failureRateThreshold: 0.5,
+    minimumRequestThreshold: 10,
+    rollingWindowMs: 30_000,
+    numberOfBuckets: 10,
+    openStateDelayMs: 15_000,
+    halfOpenMaxCalls: 2,
+  });
+  webhookCircuits.set(subscriptionId, circuit);
+  return circuit;
+}
+
+function isRetryableWebhookFailure(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return true;
+
+  const maybeStatus = (error as { statusCode?: unknown }).statusCode;
+  if (typeof maybeStatus === 'number') {
+    if (maybeStatus === 429 || maybeStatus >= 500) {
+      return true;
+    }
+    return false;
+  }
+
+  const maybeCode = (error as { code?: unknown }).code;
+  if (typeof maybeCode === 'string') {
+    return ['ETIMEDOUT', 'ECONNRESET', 'ECONNREFUSED', 'EAI_AGAIN', 'ECONNABORTED'].includes(maybeCode);
+  }
+
+  return true;
+}
+
 function getNextAttemptDelay(attempts: number) {
-  const baseDelay = Math.pow(2, attempts) * 1000;
-  const jitterFactor = 0.5 + Math.random();
-  return Math.round(baseDelay * jitterFactor);
+  return calculateExponentialBackoff({
+    attempt: attempts + 1,
+    baseDelayMs: 1000,
+    maxDelayMs: 30_000,
+    jitter: 'equal',
+  });
 }
 
 async function processWebhooks() {
@@ -47,8 +88,16 @@ async function processWebhooks() {
       const { subscription, payload } = event;
       const isLastAttempt = event.attempts >= MAX_ATTEMPTS - 1;
       const payloadString = JSON.stringify(payload);
+      const circuit = getWebhookCircuit(subscription.id);
 
       try {
+        const stateBeforeAllow = circuit.getState();
+        circuit.assertRequestAllowed();
+
+        if (stateBeforeAllow !== circuit.getState()) {
+          logger.info({ subscriptionId: subscription.id, previousState: stateBeforeAllow, nextState: circuit.getState() }, 'Webhook circuit state changed before delivery');
+        }
+
         const signature = subscription.secret
           ? createHmac('sha256', subscription.secret).update(payloadString).digest('hex')
           : '';
@@ -64,6 +113,13 @@ async function processWebhooks() {
         });
 
         if (res.ok) {
+          const stateBeforeSuccess = circuit.getState();
+          circuit.onSuccess();
+
+          if (stateBeforeSuccess !== circuit.getState()) {
+            logger.info({ subscriptionId: subscription.id, previousState: stateBeforeSuccess, nextState: circuit.getState() }, 'Webhook circuit state changed after success');
+          }
+
           // Success
           await prisma.webhookEvent.update({
             where: { id: event.id },
@@ -74,13 +130,40 @@ async function processWebhooks() {
           });
           logger.info({ eventId: event.id, url: subscription.url }, 'Webhook delivered successfully');
         } else {
-          throw new Error(`HTTP Error ${res.status}`);
+          const error = new Error(`HTTP Error ${res.status}`) as Error & { statusCode?: number };
+          error.statusCode = res.status;
+          throw error;
         }
       } catch (err: any) {
-        logger.warn({ eventId: event.id, err: err.message }, 'Webhook delivery failed');
+        if (err instanceof CircuitOpenError) {
+          const delay = getNextAttemptDelay(event.attempts);
+          const nextAttemptAt = new Date(Date.now() + delay);
+
+          logger.warn({ eventId: event.id, subscriptionId: subscription.id, delayMs: delay }, 'Webhook skipped because circuit is open');
+          await prisma.webhookEvent.update({
+            where: { id: event.id },
+            data: {
+              status: 'pending',
+              nextAttemptAt,
+            }
+          });
+          continue;
+        }
+
+        const retryable = isRetryableWebhookFailure(err);
+        if (retryable) {
+          const stateBeforeFailure = circuit.getState();
+          circuit.onFailure();
+          if (stateBeforeFailure !== circuit.getState()) {
+            logger.warn({ subscriptionId: subscription.id, previousState: stateBeforeFailure, nextState: circuit.getState() }, 'Webhook circuit state changed after failure');
+          }
+        }
+
+        logger.warn({ eventId: event.id, err: err.message, retryable }, 'Webhook delivery failed');
         
-        const nextStatus = isLastAttempt ? 'failed' : 'pending';
-        const nextAttemptAt = isLastAttempt ? null : new Date(Date.now() + getNextAttemptDelay(event.attempts));
+        const shouldRetry = retryable && !isLastAttempt;
+        const nextStatus = shouldRetry ? 'pending' : 'failed';
+        const nextAttemptAt = shouldRetry ? new Date(Date.now() + getNextAttemptDelay(event.attempts)) : null;
 
         await prisma.webhookEvent.update({
           where: { id: event.id },
