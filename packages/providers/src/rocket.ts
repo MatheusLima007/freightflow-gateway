@@ -1,8 +1,9 @@
 import { CreateShipmentInput, CreateShipmentOutput, ICarrierProvider, INormalizer, LabelNormalized, ProviderError, QuoteNormalized, TrackingNormalized } from '@freightflow/core';
 import { randomUUID } from 'crypto';
+import { ProviderSandboxEngine } from './sandbox';
 
 interface RocketRawQuote {
-  expressService: boolean;
+  expressService?: boolean;
   totalFreight: number;
   deliveryEstimate: number; // in hours
 }
@@ -22,48 +23,71 @@ class RocketQuoteNormalizer implements INormalizer<RocketRawQuote, QuoteNormaliz
 export class RocketShipCarrier implements ICarrierProvider {
   id = 'ROCKET';
   private quoteNormalizer = new RocketQuoteNormalizer();
+  private readonly sandbox = new ProviderSandboxEngine(this.id, 29);
 
   async quote(input: CreateShipmentInput): Promise<QuoteNormalized[]> {
-    const rawResponses: RocketRawQuote[] = [
-      {
-        expressService: true,
-        totalFreight: input.weight * 3.0 + 20,
-        deliveryEstimate: 24, // 1 day in hours
-      }
-    ];
+    return this.sandbox.run('quote', async () => {
+      const rawResponses: RocketRawQuote[] = [
+        {
+          expressService: true,
+          totalFreight: input.weight * 3.0 + 20,
+          deliveryEstimate: 24,
+        }
+      ];
 
-    return rawResponses.map(raw => this.quoteNormalizer.normalize(raw));
+      return rawResponses.map(raw => this.quoteNormalizer.normalize(raw));
+    }, {
+      mutatePayload: (payload) => payload.map((entry) => ({ ...entry, serviceName: `${entry.serviceName} (sandbox)` })),
+    });
   }
 
   async createShipment(input: CreateShipmentInput): Promise<CreateShipmentOutput> {
-    // 30% chance of failing to demonstrate retry needs
-    if (Math.random() < 0.3) {
-      throw new ProviderError('RocketShip API Error: 503 Service Unavailable');
-    }
+    return this.sandbox.run('shipment', async () => {
+      if (input.weight <= 0) {
+        throw new ProviderError('RocketShip invalid weight', 'ROCKET_BAD_REQUEST');
+      }
 
-    return {
-      shipmentId: `rs_${randomUUID()}`,
-      providerId: this.id,
-    };
+      return {
+        shipmentId: `rs_${randomUUID()}`,
+        providerId: this.id,
+      };
+    });
   }
 
   async createLabel(shipmentId: string): Promise<LabelNormalized> {
-    return {
+    return this.sandbox.run('label', async () => ({
       shipmentId,
       trackingCode: `RS${randomUUID().replace(/-/g, '').substring(0, 8).toUpperCase()}`,
       labelUrl: `https://api.rocketship.com/v1/labels/${shipmentId}`,
       format: 'ZPL',
-    };
+    }));
   }
 
   async track(trackingCode: string): Promise<TrackingNormalized> {
-    return {
-      trackingCode,
-      status: 'PENDING',
-      lastPolledAt: new Date(),
-      events: [
-        { date: new Date(), description: 'Label created' }
-      ]
-    };
+    return this.sandbox.run('tracking', async () => {
+      const now = new Date();
+      return {
+        trackingCode,
+        status: 'PENDING',
+        lastPolledAt: now,
+        events: [
+          { date: new Date(now.getTime() - 2 * 60 * 60 * 1000), description: 'Label created' },
+          { date: new Date(now.getTime() - 60 * 60 * 1000), description: 'Picked up by carrier', location: 'Seattle, WA' },
+        ]
+      };
+    }, {
+      mutatePayload: (payload) => {
+        const clone = {
+          ...payload,
+          events: [...payload.events],
+        };
+
+        if (clone.events.length > 1) {
+          clone.events = [clone.events[1], clone.events[0], clone.events[1]];
+        }
+
+        return clone;
+      },
+    });
   }
 }

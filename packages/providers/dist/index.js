@@ -17,5 +17,6 @@ Object.defineProperty(exports, "__esModule", { value: true });
 __exportStar(require("./acme"), exports);
 __exportStar(require("./circuit-breaker-decorator"), exports);
 __exportStar(require("./rocket"), exports);
+__exportStar(require("./sandbox"), exports);
 __exportStar(require("./selector"), exports);
 //# sourceMappingURL=index.js.map

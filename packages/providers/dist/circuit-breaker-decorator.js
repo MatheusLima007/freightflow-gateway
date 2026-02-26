@@ -4,6 +4,7 @@ exports.CircuitBreakerProviderDecorator = exports.CircuitOpenError = void 0;
 const observability_1 = require("@freightflow/observability");
 const reliability_1 = require("@freightflow/reliability");
 Object.defineProperty(exports, "CircuitOpenError", { enumerable: true, get: function () { return reliability_1.CircuitOpenError; } });
+const sandbox_1 = require("./sandbox");
 const DEFAULT_OPTIONS = {
     failureRateThreshold: 0.5,
     minimumRequestThreshold: 20,
@@ -52,9 +53,11 @@ class CircuitBreakerProviderDecorator {
             return;
         }
         const snapshot = this.getCircuit(operation).getSnapshot();
+        const profile = (0, sandbox_1.getProviderSandboxProfileName)(this.id);
         const payload = {
             providerId: this.id,
             operation,
+            profile,
             previousState,
             nextState,
             event,
@@ -64,7 +67,7 @@ class CircuitBreakerProviderDecorator {
             halfOpenInFlight: snapshot.halfOpenInFlight,
         };
         if (nextState === 'OPEN') {
-            (0, observability_1.incrementCounter)('breaker_open_total', { providerId: this.id, operation });
+            (0, observability_1.incrementCounter)('breaker_open_total', { providerId: this.id, operation, profile });
             observability_1.logger.warn(payload, 'Circuit transitioned to OPEN');
             return;
         }
@@ -78,7 +81,7 @@ class CircuitBreakerProviderDecorator {
         }
         catch (error) {
             if (error instanceof reliability_1.CircuitOpenError) {
-                (0, observability_1.incrementCounter)('breaker_short_circuit_total', { providerId: this.id, operation });
+                (0, observability_1.incrementCounter)('breaker_short_circuit_total', { providerId: this.id, operation, profile: (0, sandbox_1.getProviderSandboxProfileName)(this.id) });
                 throw new reliability_1.CircuitOpenError(`Circuit is open for provider ${this.id} on operation ${operation}`);
             }
             throw error;
@@ -93,10 +96,11 @@ class CircuitBreakerProviderDecorator {
         }
         catch (error) {
             if (this.shouldCountAsFailure(error)) {
+                const profile = (0, sandbox_1.getProviderSandboxProfileName)(this.id);
                 const statusCode = typeof error.statusCode === 'number'
                     ? error.statusCode
                     : 'unknown';
-                (0, observability_1.incrementCounter)('provider_errors_total', { providerId: this.id, operation, statusCode });
+                (0, observability_1.incrementCounter)('provider_errors_total', { providerId: this.id, operation, profile, statusCode });
                 const stateBeforeFailure = circuit.getState();
                 circuit.onFailure();
                 this.logTransition(operation, stateBeforeFailure, circuit.getState(), 'failure');

@@ -1,6 +1,7 @@
 import { CreateShipmentInput, CreateShipmentOutput, ICarrierProvider, LabelNormalized, QuoteNormalized, TrackingNormalized } from '@freightflow/core';
 import { incrementCounter, logger } from '@freightflow/observability';
 import { CircuitOpenError, RollingWindowCircuitBreaker } from '@freightflow/reliability';
+import { getProviderSandboxProfileName } from './sandbox';
 
 export { CircuitOpenError };
 
@@ -71,9 +72,11 @@ export class CircuitBreakerProviderDecorator implements ICarrierProvider {
     }
 
     const snapshot = this.getCircuit(operation).getSnapshot();
+    const profile = getProviderSandboxProfileName(this.id);
     const payload = {
       providerId: this.id,
       operation,
+      profile,
       previousState,
       nextState,
       event,
@@ -84,7 +87,7 @@ export class CircuitBreakerProviderDecorator implements ICarrierProvider {
     };
 
     if (nextState === 'OPEN') {
-      incrementCounter('breaker_open_total', { providerId: this.id, operation });
+      incrementCounter('breaker_open_total', { providerId: this.id, operation, profile });
       logger.warn(payload, 'Circuit transitioned to OPEN');
       return;
     }
@@ -99,7 +102,7 @@ export class CircuitBreakerProviderDecorator implements ICarrierProvider {
       circuit.assertRequestAllowed();
     } catch (error) {
       if (error instanceof CircuitOpenError) {
-        incrementCounter('breaker_short_circuit_total', { providerId: this.id, operation });
+        incrementCounter('breaker_short_circuit_total', { providerId: this.id, operation, profile: getProviderSandboxProfileName(this.id) });
         throw new CircuitOpenError(`Circuit is open for provider ${this.id} on operation ${operation}`);
       }
       throw error;
@@ -114,10 +117,11 @@ export class CircuitBreakerProviderDecorator implements ICarrierProvider {
       return result;
     } catch (error) {
       if (this.shouldCountAsFailure(error)) {
+        const profile = getProviderSandboxProfileName(this.id);
         const statusCode = typeof (error as { statusCode?: unknown }).statusCode === 'number'
           ? (error as { statusCode: number }).statusCode
           : 'unknown';
-        incrementCounter('provider_errors_total', { providerId: this.id, operation, statusCode });
+        incrementCounter('provider_errors_total', { providerId: this.id, operation, profile, statusCode });
         const stateBeforeFailure = circuit.getState();
         circuit.onFailure();
         this.logTransition(operation, stateBeforeFailure, circuit.getState(), 'failure');

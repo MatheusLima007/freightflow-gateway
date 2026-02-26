@@ -1,6 +1,7 @@
 import { CreateShipmentInput, CreateShipmentOutput, ICarrierProvider, LabelNormalized, QuoteNormalized, TrackingNormalized } from '@freightflow/core';
 import { incrementCounter, logger, observeHistogram } from '@freightflow/observability';
 import { calculateExponentialBackoff, sleep } from '@freightflow/reliability';
+import { getProviderSandboxProfileName } from './sandbox';
 
 export class RetryProviderDecorator implements ICarrierProvider {
   constructor(
@@ -43,6 +44,7 @@ export class RetryProviderDecorator implements ICarrierProvider {
   private async withRetry<T>(operationName: string, operation: () => Promise<T>): Promise<T> {
     let lastError: Error | unknown;
     const startedAt = Date.now();
+    const profile = getProviderSandboxProfileName(this.id);
     
     for (let attempt = 1; attempt <= this.maxRetries; attempt++) {
       const attemptStartedAt = Date.now();
@@ -51,6 +53,7 @@ export class RetryProviderDecorator implements ICarrierProvider {
         observeHistogram('request_latency_ms', Date.now() - attemptStartedAt, {
           providerId: this.id,
           operation: operationName,
+          profile,
           outcome: 'success',
         });
         return result;
@@ -60,11 +63,13 @@ export class RetryProviderDecorator implements ICarrierProvider {
         incrementCounter('retry_attempts_total', {
           providerId: this.id,
           operation: operationName,
+          profile,
           retryable,
         });
         observeHistogram('request_latency_ms', Date.now() - attemptStartedAt, {
           providerId: this.id,
           operation: operationName,
+          profile,
           outcome: 'error',
         });
 
@@ -72,6 +77,7 @@ export class RetryProviderDecorator implements ICarrierProvider {
           { 
             providerId: this.id, 
             operation: operationName, 
+            profile,
             attempt, 
             maxRetries: this.maxRetries,
             retryable,
@@ -91,6 +97,7 @@ export class RetryProviderDecorator implements ICarrierProvider {
               {
                 providerId: this.id,
                 operation: operationName,
+                profile,
                 elapsedMs,
                 maxRetryTimeMs: this.maxRetryTimeMs,
               },
@@ -106,15 +113,22 @@ export class RetryProviderDecorator implements ICarrierProvider {
             jitter: 'equal',
           });
 
-          logger.info({ providerId: this.id, operation: operationName, attempt, delayMs: waitTime }, 'Waiting before retry attempt');
+          const retryAfterSeconds = Number((error as { retryAfterSeconds?: number }).retryAfterSeconds);
+          const retryAfterMs = Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0
+            ? retryAfterSeconds * 1000
+            : 0;
+          const effectiveWaitTime = Math.max(waitTime, retryAfterMs);
 
-          if (elapsedMs + waitTime > this.maxRetryTimeMs) {
+          logger.info({ providerId: this.id, operation: operationName, profile, attempt, delayMs: effectiveWaitTime }, 'Waiting before retry attempt');
+
+          if (elapsedMs + effectiveWaitTime > this.maxRetryTimeMs) {
             logger.warn(
               {
                 providerId: this.id,
                 operation: operationName,
+                profile,
                 elapsedMs,
-                waitTime,
+                waitTime: effectiveWaitTime,
                 maxRetryTimeMs: this.maxRetryTimeMs,
               },
               'Skipping retry because it exceeds retry budget'
@@ -122,12 +136,12 @@ export class RetryProviderDecorator implements ICarrierProvider {
             break;
           }
 
-          await sleep(waitTime);
+          await sleep(effectiveWaitTime);
         }
       }
     }
     
-    logger.error({ providerId: this.id, operation: operationName }, 'Provider operation failed after all retries');
+    logger.error({ providerId: this.id, operation: operationName, profile }, 'Provider operation failed after all retries');
     throw lastError;
   }
 

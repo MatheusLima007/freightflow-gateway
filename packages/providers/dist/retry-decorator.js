@@ -3,6 +3,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.RetryProviderDecorator = void 0;
 const observability_1 = require("@freightflow/observability");
 const reliability_1 = require("@freightflow/reliability");
+const sandbox_1 = require("./sandbox");
 class RetryProviderDecorator {
     provider;
     maxRetries;
@@ -43,6 +44,7 @@ class RetryProviderDecorator {
     async withRetry(operationName, operation) {
         let lastError;
         const startedAt = Date.now();
+        const profile = (0, sandbox_1.getProviderSandboxProfileName)(this.id);
         for (let attempt = 1; attempt <= this.maxRetries; attempt++) {
             const attemptStartedAt = Date.now();
             try {
@@ -50,6 +52,7 @@ class RetryProviderDecorator {
                 (0, observability_1.observeHistogram)('request_latency_ms', Date.now() - attemptStartedAt, {
                     providerId: this.id,
                     operation: operationName,
+                    profile,
                     outcome: 'success',
                 });
                 return result;
@@ -60,16 +63,19 @@ class RetryProviderDecorator {
                 (0, observability_1.incrementCounter)('retry_attempts_total', {
                     providerId: this.id,
                     operation: operationName,
+                    profile,
                     retryable,
                 });
                 (0, observability_1.observeHistogram)('request_latency_ms', Date.now() - attemptStartedAt, {
                     providerId: this.id,
                     operation: operationName,
+                    profile,
                     outcome: 'error',
                 });
                 observability_1.logger.warn({
                     providerId: this.id,
                     operation: operationName,
+                    profile,
                     attempt,
                     maxRetries: this.maxRetries,
                     retryable,
@@ -84,6 +90,7 @@ class RetryProviderDecorator {
                         observability_1.logger.warn({
                             providerId: this.id,
                             operation: operationName,
+                            profile,
                             elapsedMs,
                             maxRetryTimeMs: this.maxRetryTimeMs,
                         }, 'Retry budget exhausted before next attempt');
@@ -95,22 +102,28 @@ class RetryProviderDecorator {
                         maxDelayMs: this.maxDelayMs,
                         jitter: 'equal',
                     });
-                    observability_1.logger.info({ providerId: this.id, operation: operationName, attempt, delayMs: waitTime }, 'Waiting before retry attempt');
-                    if (elapsedMs + waitTime > this.maxRetryTimeMs) {
+                    const retryAfterSeconds = Number(error.retryAfterSeconds);
+                    const retryAfterMs = Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0
+                        ? retryAfterSeconds * 1000
+                        : 0;
+                    const effectiveWaitTime = Math.max(waitTime, retryAfterMs);
+                    observability_1.logger.info({ providerId: this.id, operation: operationName, profile, attempt, delayMs: effectiveWaitTime }, 'Waiting before retry attempt');
+                    if (elapsedMs + effectiveWaitTime > this.maxRetryTimeMs) {
                         observability_1.logger.warn({
                             providerId: this.id,
                             operation: operationName,
+                            profile,
                             elapsedMs,
-                            waitTime,
+                            waitTime: effectiveWaitTime,
                             maxRetryTimeMs: this.maxRetryTimeMs,
                         }, 'Skipping retry because it exceeds retry budget');
                         break;
                     }
-                    await (0, reliability_1.sleep)(waitTime);
+                    await (0, reliability_1.sleep)(effectiveWaitTime);
                 }
             }
         }
-        observability_1.logger.error({ providerId: this.id, operation: operationName }, 'Provider operation failed after all retries');
+        observability_1.logger.error({ providerId: this.id, operation: operationName, profile }, 'Provider operation failed after all retries');
         throw lastError;
     }
     async quote(input) {
