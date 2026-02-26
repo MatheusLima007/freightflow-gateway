@@ -2,44 +2,71 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.RetryProviderDecorator = void 0;
 const observability_1 = require("@freightflow/observability");
-const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+const reliability_1 = require("@freightflow/reliability");
 class RetryProviderDecorator {
     provider;
     maxRetries;
     baseDelayMs;
-    constructor(provider, maxRetries = 3, baseDelayMs = 500) {
+    maxDelayMs;
+    maxRetryTimeMs;
+    constructor(provider, maxRetries = 3, baseDelayMs = 500, maxDelayMs = 30_000, maxRetryTimeMs = 5_000) {
         this.provider = provider;
         this.maxRetries = maxRetries;
         this.baseDelayMs = baseDelayMs;
+        this.maxDelayMs = maxDelayMs;
+        this.maxRetryTimeMs = maxRetryTimeMs;
     }
     get id() {
         return this.provider.id;
     }
     isRetryable(error) {
         if (!error || typeof error !== 'object')
-            return true;
+            return false;
+        const maybeCode = error.code;
+        if (maybeCode === 'CIRCUIT_OPEN') {
+            return false;
+        }
+        if (typeof maybeCode === 'string') {
+            const transientErrorCodes = new Set(['ETIMEDOUT', 'ECONNRESET', 'ECONNREFUSED', 'EAI_AGAIN', 'ECONNABORTED']);
+            if (transientErrorCodes.has(maybeCode)) {
+                return true;
+            }
+        }
         const maybeStatusCode = error.statusCode;
         if (typeof maybeStatusCode !== 'number')
-            return true;
+            return false;
         if (maybeStatusCode >= 500 || maybeStatusCode === 429) {
             return true;
         }
         return false;
     }
-    getJitterDelay(attempt) {
-        const exponentialDelay = this.baseDelayMs * Math.pow(2, attempt - 1);
-        const jitterFactor = 0.5 + Math.random();
-        return Math.round(exponentialDelay * jitterFactor);
-    }
     async withRetry(operationName, operation) {
         let lastError;
+        const startedAt = Date.now();
         for (let attempt = 1; attempt <= this.maxRetries; attempt++) {
+            const attemptStartedAt = Date.now();
             try {
-                return await operation();
+                const result = await operation();
+                (0, observability_1.observeHistogram)('request_latency_ms', Date.now() - attemptStartedAt, {
+                    providerId: this.id,
+                    operation: operationName,
+                    outcome: 'success',
+                });
+                return result;
             }
             catch (error) {
                 lastError = error;
                 const retryable = this.isRetryable(error);
+                (0, observability_1.incrementCounter)('retry_attempts_total', {
+                    providerId: this.id,
+                    operation: operationName,
+                    retryable,
+                });
+                (0, observability_1.observeHistogram)('request_latency_ms', Date.now() - attemptStartedAt, {
+                    providerId: this.id,
+                    operation: operationName,
+                    outcome: 'error',
+                });
                 observability_1.logger.warn({
                     providerId: this.id,
                     operation: operationName,
@@ -52,8 +79,34 @@ class RetryProviderDecorator {
                     break;
                 }
                 if (attempt < this.maxRetries) {
-                    const waitTime = this.getJitterDelay(attempt);
-                    await delay(waitTime);
+                    const elapsedMs = Date.now() - startedAt;
+                    if (elapsedMs >= this.maxRetryTimeMs) {
+                        observability_1.logger.warn({
+                            providerId: this.id,
+                            operation: operationName,
+                            elapsedMs,
+                            maxRetryTimeMs: this.maxRetryTimeMs,
+                        }, 'Retry budget exhausted before next attempt');
+                        break;
+                    }
+                    const waitTime = (0, reliability_1.calculateExponentialBackoff)({
+                        attempt,
+                        baseDelayMs: this.baseDelayMs,
+                        maxDelayMs: this.maxDelayMs,
+                        jitter: 'equal',
+                    });
+                    observability_1.logger.info({ providerId: this.id, operation: operationName, attempt, delayMs: waitTime }, 'Waiting before retry attempt');
+                    if (elapsedMs + waitTime > this.maxRetryTimeMs) {
+                        observability_1.logger.warn({
+                            providerId: this.id,
+                            operation: operationName,
+                            elapsedMs,
+                            waitTime,
+                            maxRetryTimeMs: this.maxRetryTimeMs,
+                        }, 'Skipping retry because it exceeds retry budget');
+                        break;
+                    }
+                    await (0, reliability_1.sleep)(waitTime);
                 }
             }
         }

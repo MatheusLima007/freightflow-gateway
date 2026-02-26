@@ -18,6 +18,7 @@
   "types": "dist/index.d.ts",
   "dependencies": {
     "@freightflow/core": "workspace:*",
+    "@freightflow/reliability": "workspace:*",
     "@freightflow/observability": "workspace:*"
   }
 }

@@ -1,5 +1,6 @@
 import { CreateShipmentInput, ICarrierProvider, IRoutingStrategy } from '@freightflow/core';
 import { AcmeCarrier } from './acme';
+import { CircuitBreakerProviderDecorator } from './circuit-breaker-decorator';
 import { RetryProviderDecorator } from './retry-decorator';
 import { RocketShipCarrier } from './rocket';
 
@@ -49,5 +50,5 @@ export class ProviderSelector {
 // Configured instance using dependency injection (manual)
 const strategy = new ZipPrefixRoutingStrategy();
 export const defaultSelector = new ProviderSelector(strategy);
-defaultSelector.register(new RetryProviderDecorator(new AcmeCarrier()));
-defaultSelector.register(new RetryProviderDecorator(new RocketShipCarrier()));
+defaultSelector.register(new RetryProviderDecorator(new CircuitBreakerProviderDecorator(new AcmeCarrier())));
+defaultSelector.register(new RetryProviderDecorator(new CircuitBreakerProviderDecorator(new RocketShipCarrier())));

@@ -2,6 +2,7 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.defaultSelector = exports.ProviderSelector = exports.ZipPrefixRoutingStrategy = void 0;
 const acme_1 = require("./acme");
+const circuit_breaker_decorator_1 = require("./circuit-breaker-decorator");
 const retry_decorator_1 = require("./retry-decorator");
 const rocket_1 = require("./rocket");
 class ZipPrefixRoutingStrategy {
@@ -43,6 +44,6 @@ exports.ProviderSelector = ProviderSelector;
 // Configured instance using dependency injection (manual)
 const strategy = new ZipPrefixRoutingStrategy();
 exports.defaultSelector = new ProviderSelector(strategy);
-exports.defaultSelector.register(new retry_decorator_1.RetryProviderDecorator(new acme_1.AcmeCarrier()));
-exports.defaultSelector.register(new retry_decorator_1.RetryProviderDecorator(new rocket_1.RocketShipCarrier()));
+exports.defaultSelector.register(new retry_decorator_1.RetryProviderDecorator(new circuit_breaker_decorator_1.CircuitBreakerProviderDecorator(new acme_1.AcmeCarrier())));
+exports.defaultSelector.register(new retry_decorator_1.RetryProviderDecorator(new circuit_breaker_decorator_1.CircuitBreakerProviderDecorator(new rocket_1.RocketShipCarrier())));
 //# sourceMappingURL=selector.js.map

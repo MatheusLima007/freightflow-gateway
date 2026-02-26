@@ -3,10 +3,11 @@ export declare class RetryProviderDecorator implements ICarrierProvider {
     private readonly provider;
     private readonly maxRetries;
     private readonly baseDelayMs;
-    constructor(provider: ICarrierProvider, maxRetries?: number, baseDelayMs?: number);
+    private readonly maxDelayMs;
+    private readonly maxRetryTimeMs;
+    constructor(provider: ICarrierProvider, maxRetries?: number, baseDelayMs?: number, maxDelayMs?: number, maxRetryTimeMs?: number);
     get id(): string;
     private isRetryable;
-    private getJitterDelay;
     private withRetry;
     quote(input: CreateShipmentInput): Promise<QuoteNormalized[]>;
     createShipment(input: CreateShipmentInput): Promise<CreateShipmentOutput>;
