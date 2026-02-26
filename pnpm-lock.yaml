@@ -69,6 +69,9 @@ importers:
       '@freightflow/observability':
         specifier: workspace:*
         version: link:../../packages/observability
+      '@freightflow/reliability':
+        specifier: workspace:*
+        version: link:../../packages/reliability
       '@prisma/client':
         specifier: ^7.4.1
         version: 7.4.1(prisma@5.22.0)(typescript@5.9.3)
@@ -109,6 +112,9 @@ importers:
       '@freightflow/observability':
         specifier: workspace:*
         version: link:../observability
+      '@freightflow/reliability':
+        specifier: workspace:*
+        version: link:../reliability
     devDependencies:
       typescript:
         specifier: ^5.9.3
