@@ -20,6 +20,7 @@ export async function buildApp() {
   app.register(require('./routes/shipments').shipmentsRoutes);
   app.register(require('./routes/trackings').trackingsRoutes);
   app.register(require('./routes/webhooks').webhooksRoutes);
+  app.register(require('./routes/admin-sandbox').adminSandboxRoutes);
 
   return app;
 }

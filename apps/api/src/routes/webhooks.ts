@@ -56,18 +56,22 @@ export async function webhooksRoutes(app: FastifyInstance) {
       }
     });
     
-    const eventsToCreate = subs.map((sub: any) => ({
+    const eventsToCreate = subs.map((sub: any) => {
+      const resolvedEventId = eventId || randomUUID();
+      return {
       subscriptionId: sub.id,
-      eventId: eventId || randomUUID(),
+      eventId: resolvedEventId,
       shipmentId,
       status: 'pending',
       payload: {
+        eventId: resolvedEventId,
         shipmentId,
         status,
         eventType,
         occurredAt: new Date().toISOString()
       },
-    }));
+    };
+    });
 
     if (eventsToCreate.length > 0) {
       await prisma.webhookEvent.createMany({

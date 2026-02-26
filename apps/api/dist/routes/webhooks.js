@@ -52,18 +52,22 @@ async function webhooksRoutes(app) {
                 ]
             }
         });
-        const eventsToCreate = subs.map((sub) => ({
-            subscriptionId: sub.id,
-            eventId: eventId || (0, crypto_1.randomUUID)(),
-            shipmentId,
-            status: 'pending',
-            payload: {
+        const eventsToCreate = subs.map((sub) => {
+            const resolvedEventId = eventId || (0, crypto_1.randomUUID)();
+            return {
+                subscriptionId: sub.id,
+                eventId: resolvedEventId,
                 shipmentId,
-                status,
-                eventType,
-                occurredAt: new Date().toISOString()
-            },
-        }));
+                status: 'pending',
+                payload: {
+                    eventId: resolvedEventId,
+                    shipmentId,
+                    status,
+                    eventType,
+                    occurredAt: new Date().toISOString()
+                },
+            };
+        });
         if (eventsToCreate.length > 0) {
             await core_1.prisma.webhookEvent.createMany({
                 data: eventsToCreate
